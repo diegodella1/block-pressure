@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BLOCK PRESSURE — Bitcoin Mempool Live</title>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #05101f;
+      --bg-chart: #070f1c;
+      --bg-orderbook: #060e1a;
+      --bg-ticker: #050d18;
+      --bg-hud: #0a1628;
+      --bg-separator: #1e2d3d;
+      --text-primary: #e0e8f0;
+      --text-secondary: #8899aa;
+      --text-muted: #445566;
+      --accent-cyan: #00d4ff;
+      --accent-orange: #f0a500;
+      --accent-white: #ffffff;
+      --fee-very-high: #ff3333;
+      --fee-high: #ff6b00;
+      --fee-medium-high: #f0a500;
+      --fee-medium: #c8b800;
+      --fee-low-medium: #4a9eff;
+      --fee-low: #2a6aaa;
+      --fee-very-low: #1a3a6b;
+      --state-ok: #00cc66;
+      --state-warn: #f0a500;
+      --state-error: #ff3333;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; font-family: 'Space Mono', monospace; background: var(--bg-primary); color: var(--text-primary); }
+
+    .app { width: 100%; height: 100%; display: flex; flex-direction: column; position: relative; }
+
+    /* Zona A — HUD Superior (8%) */
+    .hud-top { height: 8%; min-height: 48px; background: var(--bg-hud); border-bottom: 1px solid var(--bg-separator); display: flex; align-items: center; justify-content: center; padding: 0 24px; gap: 16px; flex-shrink: 0; box-shadow: inset 0 0 40px rgba(0,0,0,0.5); }
+    .hud-top .item { display: flex; align-items: center; gap: 6px; font-size: 18px; }
+    .hud-top .item .value { font-size: 22px; font-weight: 700; color: var(--text-primary); }
+    .hud-top .item .label { font-size: 16px; font-weight: 400; color: var(--text-secondary); }
+    .hud-top .sep { color: #2a3a4a; font-size: 14px; }
+    .connection-status { width: 8px; height: 8px; border-radius: 50%; background: var(--state-ok); transition: background 0.3s; }
+    .connection-status.disconnected { background: var(--state-error); }
+    .connection-status.connecting { background: var(--state-warn); animation: pulse 1s infinite; }
+
+    /* Zona B + C — Chart + Order Book (72%) */
+    .main-area { flex: 1; display: flex; min-height: 0; }
+    .chart-container { flex: 0 0 72%; position: relative; background: var(--bg-chart); border-right: 1px solid var(--bg-separator); overflow: hidden; box-shadow: inset 0 0 40px rgba(0,0,0,0.5); }
+    .chart-container canvas { display: block; width: 100%; height: 100%; }
+    .chart-title { position: absolute; top: 12px; left: 16px; font-size: 13px; color: var(--text-muted); font-weight: 400; z-index: 2; }
+    /* Vignette overlay on chart */
+    .chart-container::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.6) 100%); z-index: 1; }
+    /* Congestion red tint overlay */
+    .chart-congestion-overlay { position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at center, rgba(255,0,0,0.08) 0%, rgba(255,0,0,0.15) 100%); opacity: 0; transition: opacity 1.5s ease; z-index: 1; }
+    .chart-congestion-overlay.active { opacity: 1; }
+
+    /* Zona C — Order Book (28%) */
+    .orderbook-panel { flex: 0 0 28%; background: var(--bg-orderbook); display: flex; flex-direction: column; overflow: hidden; box-shadow: inset 0 0 40px rgba(0,0,0,0.5); }
+    .orderbook-header { padding: 12px 16px; font-weight: 700; font-size: 16px; color: var(--text-secondary); background: #0d1828; border-bottom: 1px solid var(--bg-separator); }
+    .orderbook-columns { display: flex; padding: 8px 16px; font-size: 13px; color: var(--text-muted); border-bottom: 1px solid var(--bg-separator); }
+    .orderbook-columns span:nth-child(1) { flex: 0 0 70px; }
+    .orderbook-columns span:nth-child(2) { flex: 1; text-align: right; }
+    .orderbook-columns span:nth-child(3) { flex: 0 0 60px; text-align: right; }
+    .orderbook-rows { flex: 1; overflow-y: auto; padding: 0 8px; }
+    .orderbook-row { display: flex; align-items: center; padding: 6px 8px; font-size: 15px; border-bottom: 1px solid rgba(30,45,61,0.5); transition: background 0.3s; position: relative; }
+    .orderbook-row .depth-bar { position: absolute; left: 0; top: 0; height: 100%; opacity: 0.12; pointer-events: none; transition: width 0.4s ease; }
+    .orderbook-row .tier { flex: 0 0 70px; font-weight: 400; position: relative; z-index: 1; }
+    .orderbook-row .vbytes { flex: 1; text-align: right; color: var(--text-primary); position: relative; z-index: 1; }
+    .orderbook-row .btc { flex: 0 0 60px; text-align: right; color: var(--text-secondary); position: relative; z-index: 1; }
+    .orderbook-row.flash { animation: rowFlash 0.3s ease-out; }
+    .orderbook-row.sweep { animation: sweepCyan 0.6s ease-out; }
+    .orderbook-cut { position: relative; border-top: 1px solid var(--accent-cyan); padding: 4px 16px; font-size: 13px; color: var(--accent-cyan); box-shadow: 0 0 8px rgba(0,212,255,0.4); }
+    .orderbook-capacity { padding: 8px 16px; display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--bg-separator); }
+    .orderbook-capacity-bar { flex: 1; height: 24px; background: #0d1f30; border-radius: 2px; overflow: hidden; }
+    .orderbook-capacity-fill { height: 100%; background: linear-gradient(to top, #1a3a6b, #4a9eff, #f0a500, #ff3333); transition: width 0.2s; }
+    .orderbook-capacity-fill.pulse { animation: capacityPulse 1s ease-in-out infinite; }
+    .orderbook-capacity-label { font-size: 13px; color: var(--text-muted); white-space: nowrap; }
+
+    /* Zona D — Ticker Tape (8%) */
+    .ticker-container { height: 8%; min-height: 48px; background: var(--bg-ticker); border-top: 1px solid var(--bg-separator); overflow: hidden; flex-shrink: 0; box-shadow: inset 0 0 40px rgba(0,0,0,0.5); }
+    .ticker-container canvas { display: block; width: 100%; height: 100%; }
+
+    /* Zona A2 — HUD Inferior (8%) */
+    .hud-bottom { height: 8%; min-height: 48px; background: var(--bg-hud); border-top: 1px solid var(--bg-separator); display: flex; align-items: center; justify-content: space-between; padding: 0 24px; flex-shrink: 0; box-shadow: inset 0 0 40px rgba(0,0,0,0.5); }
+    .hud-bottom .left { display: flex; gap: 24px; align-items: center; }
+    .hud-bottom .left .item { display: flex; align-items: center; gap: 6px; font-size: 18px; }
+    .hud-bottom .left .item .value { font-size: 22px; font-weight: 700; }
+    .hud-bottom .left .item .label { font-size: 16px; color: var(--text-secondary); }
+    .info-zone { flex: 1; text-align: right; font-size: 15px; color: #667788; white-space: nowrap; overflow: hidden; }
+
+    /* Toast */
+    .toast { padding: 12px 20px; background: #0a1628; border-left: 3px solid var(--accent-orange); font-size: 16px; color: var(--text-primary); animation: slideIn 0.3s ease-out; max-width: 100%; }
+    .toast.block-event { background: #0d2137; border-left: none; border-top: 2px solid var(--accent-cyan); font-size: 20px; font-weight: 700; }
+    .toast.block-event .detail { font-size: 15px; font-weight: 400; margin-top: 4px; color: var(--text-secondary); }
+    .toast.slow-block { border-left-color: var(--state-error); animation: slideIn 0.3s ease-out, pulse 2s infinite; }
+
+    /* Super whale fullscreen flash */
+    .super-whale-flash { position: fixed; inset: 0; background: rgba(255,255,255,0.15); pointer-events: none; z-index: 998; animation: superWhaleFlash 0.8s ease-out forwards; }
+
+    /* RoxomTV branding */
+    .branding { position: fixed; bottom: 8px; left: 16px; font-size: 12px; color: rgba(255,255,255,0.15); font-weight: 400; z-index: 2; letter-spacing: 2px; pointer-events: none; }
+
+    /* Estados de carga */
+    .state-overlay { position: fixed; inset: 0; background: var(--bg-primary); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+    .state-overlay.hidden { display: none; }
+    .state-overlay .message { font-size: 18px; color: var(--text-secondary); font-weight: 400; }
+    .state-overlay.connecting .message { animation: pulse 1.5s infinite; }
+    .state-overlay.error .message { color: var(--text-muted); font-weight: 700; }
+
+    /* Grain overlay */
+    .grain-overlay { position: fixed; inset: 0; pointer-events: none; z-index: 999; opacity: 0.03; }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    @keyframes rowFlash { 0% { background: rgba(0, 204, 102, 0.4); } 100% { background: transparent; } }
+    @keyframes sweepCyan { 0% { background: rgba(0, 212, 255, 0.5); } 100% { background: transparent; } }
+    @keyframes slideIn { from { transform: translateX(20px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    @keyframes capacityPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    @keyframes superWhaleFlash { 0% { opacity: 1; } 100% { opacity: 0; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="state-overlay" id="stateOverlay">
+      <span class="message" id="stateMessage">CONNECTING TO BITCOIN NETWORK...</span>
+    </div>
+
+    <div class="hud-top" id="hudTop">
+      <div class="connection-status" id="connectionStatus"></div>
+      <span class="item"><span class="label">BLOCK #</span><span class="value" id="blockNumber">—</span></span>
+      <span class="sep">•</span>
+      <span class="item"><span class="label">MEMPOOL</span><span class="value" id="mempoolCount">0</span> txs</span>
+      <span class="sep">•</span>
+      <span class="item"><span class="label">FEE MED</span><span class="value" id="feeMedian">—</span> sat/vB</span>
+      <span class="sep">•</span>
+      <span class="item"><span class="label">HASHRATE</span><span class="value" id="hashrate">—</span></span>
+      <span class="sep">•</span>
+      <span class="item"><span class="label">TIME SINCE BLOCK</span><span class="value" id="timeSinceBlock">00:00</span></span>
+    </div>
+
+    <div class="main-area">
+      <div class="chart-container">
+        <div class="chart-title">BTC ENTERING MEMPOOL • 20 min window</div>
+        <div class="chart-congestion-overlay" id="congestionOverlay"></div>
+        <canvas id="areaChart"></canvas>
+      </div>
+      <div class="orderbook-panel">
+        <div class="orderbook-header">MEMPOOL ORDER BOOK</div>
+        <div class="orderbook-columns"><span>sat/vB</span><span>vBytes</span><span>BTC</span></div>
+        <div class="orderbook-rows" id="orderbookRows"></div>
+        <div class="orderbook-capacity">
+          <div class="orderbook-capacity-bar"><div class="orderbook-capacity-fill" id="capacityFill" style="width: 0%"></div></div>
+          <span class="orderbook-capacity-label" id="capacityLabel">NEXT BLOCK 0%</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="ticker-container">
+      <canvas id="tickerTape"></canvas>
+    </div>
+
+    <div class="hud-bottom">
+      <div class="left">
+        <span class="item"><span class="label">₿ IN MEMPOOL</span><span class="value" id="totalBtc">0</span></span>
+        <span class="sep">•</span>
+        <span class="item"><span class="label">MIN FEE</span><span class="value" id="minFeeHud">—</span> sat/vB</span>
+      </div>
+      <div class="info-zone" id="infoZone" style="font-size:15px;color:#667788;text-align:right;"></div>
+    </div>
+  </div>
+
+  <div class="branding">ROXOMTV</div>
+  <canvas class="grain-overlay" id="grainCanvas"></canvas>
+
+  <script src="app2.js"></script>
+</body>
+</html>

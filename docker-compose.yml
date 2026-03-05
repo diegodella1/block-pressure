@@ -1,0 +1,11 @@
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "3090:80"
+    volumes:
+      - ./index.html:/usr/share/nginx/html/index.html:ro
+      - ./app.js:/usr/share/nginx/html/app.js:ro
+      - ./app2.js:/usr/share/nginx/html/app2.js:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    restart: unless-stopped
