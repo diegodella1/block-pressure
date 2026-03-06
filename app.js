@@ -651,27 +651,13 @@ class AreaChart {
     for (const spike of this.whaleSpikes) {
       if (spike.x > padding.left + chartW || spike.x < padding.left) continue;
 
-      let curveY = padding.top + chartH;
-      if (this.topCurveMap && this.topCurveMap.length > 0) {
-        // Find nearest X in the curve map to determine the height.
-        // A simple linear scan is fast enough given the small array size (< 100 buckets)
-        let nearestDist = Infinity;
-        for (const pt of this.topCurveMap) {
-          const dist = Math.abs(pt.x - spike.x);
-          if (dist < nearestDist) {
-            nearestDist = dist;
-            curveY = pt.y;
-          }
-        }
-      }
-
-      // Float the whale so its tip perfectly touches the curve
-      let drawY = curveY - 16;
+      // Float the whale at the top vertex of the chart
+      let drawY = padding.top + 10;
 
       // Auto-stacking if multiple whales are clumping together
       for (const existing of drawnSpikes) {
         if (Math.abs(existing.x - spike.x) < 50 && Math.abs(existing.y - drawY) < 30) {
-          drawY -= 34; // Push it UP instead of down so it doesn't clip into the curve
+          drawY += 34; // Push it DOWN so it stacks politely
         }
       }
       drawnSpikes.push({ x: spike.x, y: drawY });
