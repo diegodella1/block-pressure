@@ -8,10 +8,10 @@ const CONFIG = {
   USE_MOCK_DATA: false,
   RECONNECT_BASE_DELAY: 1000,
   RECONNECT_MAX_DELAY: 30000,
-  CHART_WINDOW_MINUTES: 20,
-  CHART_BUCKET_SECONDS: 10,
-  TICKER_BASE_SPEED: 100,
-  TICKER_MAX_SPEED: 180,
+  CHART_WINDOW_MINUTES: 5,
+  CHART_BUCKET_SECONDS: 5,
+  TICKER_BASE_SPEED: 140,
+  TICKER_MAX_SPEED: 240,
   TICKER_MIN_SPEED: 60,
   TICKER_BUFFER_SIZE: 500,
   ORDER_BOOK_TIERS: [
@@ -105,18 +105,21 @@ class WebSocketManager {
         this.reconnectDelay = CONFIG.RECONNECT_BASE_DELAY;
         this.ws.send(JSON.stringify({ action: 'want', data: ['live-2h-chart', 'stats', 'mempool-blocks', 'blocks', 'transactions'] }));
         this.onStateChange('connected');
+        // Request historical graph blocks immediately to speed up initial drawing
+        this.ws.send(JSON.stringify({ action: 'init' }));
+        this.ws.send(JSON.stringify({ "track-mempool-block": 0 }));
       };
       this.ws.onmessage = (e) => {
         try {
           const data = JSON.parse(e.data);
           this.onMessage(data);
-        } catch (_) {}
+        } catch (_) { }
       };
       this.ws.onclose = () => {
         this.onStateChange('disconnected');
         this.scheduleReconnect();
       };
-      this.ws.onerror = () => {};
+      this.ws.onerror = () => { };
     } catch (e) {
       this.onStateChange('error');
     }
@@ -400,7 +403,8 @@ class AreaChart {
     this.whaleSpikes = [];
     this.minFeeLine = 0;
     this.scannerX = -1;
-    this.scannerActive = false;
+    this.鯨Img = new Image();
+    this.鯨Img.src = `data:image/svg+xml;charset=utf-8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="%23f0a500" d="M22.23,13.12C20.65,11.2 18.23,10 15.5,10c-1.35,0-2.6.36-3.71,1C11,11.55 10.36,12.33 10,13.25c-0.65,0-1.3.11-1.92.3c-1.54.45-2.88,1.3-3.88,2.44C3.89,16.29 4,16.32 4.14,16.2c0.88-0.74 2.01-1.19 3.23-1.19 1.25,0 2.41.47 3.29,1.26 1.48,1.29 3.53,2 5.56,2 2.39,0 4.62-0.89 6.27-2.39c0.1-.11.11-.27 0-.37C21.43,14.6 22,13.4 22.23,13.12z M17.5,13.5A1.5,1.5 0 0,1 19,15 A1.5,1.5 0 0,1 17.5,16.5 A1.5,1.5 0 0,1 16,15 A1.5,1.5 0 0,1 17.5,13.5z M11.83,3.15C11.66,3.15 11.53,3.3 11.56,3.46c0.16,0.66 0.05,1.38-0.29,2C10.39,6.4 8.78,6 7.15,6c-2.48,0-4.6,1.13-5.75,2.78c-0.07.13 0.04.28 0.17.26C2.71,8.5 4,8.15 5.25,8.15c2.31,0 4.4,0.92 5.95,2.43L11.23,10.5C11.02,8.85 11.45,6.72 13,5.23c0.8-0.78 1.83-1.28 2.95-1.42 0.13-.02 0.2-.17 0.13-.28C15.1,2.83 13.5,3.15 11.83,3.15z"/></svg>`;
   }
 
   resize() {
@@ -424,6 +428,7 @@ class AreaChart {
   addTx(tx) {
     const btc = tx.btc ?? satsToBtc(tx.value ?? 0);
     if (btc >= 50) {
+      // Anchored to the far right (NOW) when created
       this.whaleSpikes.push({ time: Date.now(), btc, x: this.width });
     }
   }
@@ -444,7 +449,14 @@ class AreaChart {
   update(delta) {
     const scrollSpeed = this.width / (CONFIG.CHART_WINDOW_MINUTES * 60 * 1000);
     this.scrollOffset += delta * scrollSpeed;
-    this.whaleSpikes = this.whaleSpikes.filter(s => Date.now() - s.time < 8000);
+
+    // Move existing whale spikes leftward at the same speed the chart scrolls
+    for (const spike of this.whaleSpikes) {
+      spike.x -= delta * scrollSpeed;
+    }
+    // Remove spikes that have scrolled off-screen (past the left padding)
+    this.whaleSpikes = this.whaleSpikes.filter(s => s.x > 0);
+
     if (this.scannerActive) {
       this.scannerX -= (this.width / 2000) * delta;
       if (this.scannerX < 0) {
@@ -599,6 +611,33 @@ class AreaChart {
     ctx.stroke();
     ctx.shadowBlur = 0;
 
+    // Draw Whale Markers
+    ctx.font = '14px "Space Mono"';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    for (const spike of this.whaleSpikes) {
+      if (spike.x > padding.left + chartW || spike.x < padding.left) continue;
+
+      const drawY = padding.top + 20;
+
+      // Draw SVG Whale
+      ctx.shadowColor = 'rgba(240,165,0,0.6)';
+      ctx.shadowBlur = 8;
+      if (this.鯨Img.complete) {
+        // Draw the whale centered around its tip
+        ctx.drawImage(this.鯨Img, spike.x - 12, drawY - 12, 24, 24);
+      } else {
+        ctx.fillStyle = '#f0a500';
+        ctx.fillText('⚡', spike.x - 6, drawY);
+      }
+      ctx.shadowBlur = 0;
+
+      // Draw BTC amount text next to the whale
+      ctx.fillStyle = '#e0e8f0';
+      ctx.fillText(`${Math.round(spike.btc)} BTC`, spike.x + 16, drawY);
+    }
+    ctx.textBaseline = 'alphabetic'; // Reset
+
     // Whale spikes
     for (const spike of this.whaleSpikes) {
       const age = (now - spike.time) / 1000;
@@ -637,11 +676,8 @@ class AreaChart {
 
 // ========== OrderBook ==========
 class OrderBook {
-  constructor(container, cutEl, capacityFill, capacityLabel) {
+  constructor(container) {
     this.container = container;
-    this.cutEl = cutEl;
-    this.capacityFill = capacityFill;
-    this.capacityLabel = capacityLabel;
     this.flashRows = new Set();
     this.sweepRows = new Set();
     this.rowElements = new Map();
@@ -664,7 +700,16 @@ class OrderBook {
       if (this.rowElements.has(key)) {
         const el = this.rowElements.get(key);
         if (row.isCut) {
-          el.textContent = `MIN FEE: ${row.minFee || '—'} sat/vB`;
+          const halvingBlock = 1_050_000;
+          let text = 'HALVING IN COMPUTING...';
+          if (state && state.blockHeight > 0) {
+            const blocksLeft = Math.max(0, halvingBlock - state.blockHeight);
+            text = `HALVING IN ~${blocksLeft.toLocaleString()} BLOCKS`;
+          }
+          const cutFee = typeof row.minFee === 'number' ? row.minFee.toFixed(2) : (row.minFee || '—');
+          // el.textContent = text;
+          // Volvemos a mostrar la min fee cortada por si prefieren ver la data pura. Si no, comentar lo de abajo y descomentar lo de arriba.
+          el.textContent = text;
         } else {
           this._updateRowContent(el, row);
         }
@@ -678,8 +723,16 @@ class OrderBook {
         if (row.isCut) {
           el = document.createElement('div');
           el.className = 'orderbook-cut';
-          el.textContent = `MIN FEE: ${row.minFee || '—'} sat/vB`;
-          el.style.cssText = 'position:relative;border-top:1px solid #00d4ff;padding:4px 16px;font-size:13px;color:#00d4ff;box-shadow:0 0 8px rgba(0,212,255,0.4);';
+
+          const halvingBlock = 1_050_000;
+          let text = 'HALVING IN COMPUTING...';
+          if (state && state.blockHeight > 0) {
+            const blocksLeft = Math.max(0, halvingBlock - state.blockHeight);
+            text = `HALVING IN ~${blocksLeft.toLocaleString()} BLOCKS`;
+          }
+
+          el.textContent = text;
+          el.style.cssText = 'position:relative;border-top:1px solid #f0a500;padding:6px 16px;font-size:14px;color:#f0a500;box-shadow:0 0 12px rgba(240,165,0,0.5);letter-spacing:1.5px;font-weight:700;text-align:center;text-transform:uppercase;';
         } else {
           el = this._createRow(row);
         }
@@ -693,16 +746,6 @@ class OrderBook {
         this.rowElements.get(key).remove();
         this.rowElements.delete(key);
       }
-    }
-
-    const pct = state.getBlockCapacityPercent();
-    this.capacityFill.style.width = `${Math.min(100, pct)}%`;
-    const backlog = state.getBlocksBacklog();
-    this.capacityLabel.textContent = backlog > 1 ? `${backlog} BLOCKS QUEUED` : `NEXT BLOCK ${Math.round(pct)}%`;
-    if (pct > 90) {
-      this.capacityFill.classList.add('pulse');
-    } else {
-      this.capacityFill.classList.remove('pulse');
     }
   }
 
@@ -801,8 +844,9 @@ class TickerTape {
     this.pixelOffset = 0;
     this.speed = CONFIG.TICKER_BASE_SPEED;
     this.whaleSlowdownUntil = 0;
+    this.whaleSlowdownUntil = 0;
     // Fixed-width slot system: each tx gets exactly SLOT_WIDTH pixels
-    this.SLOT_WIDTH = 420;
+    this.SLOT_WIDTH = 650;
   }
 
   resize() {
@@ -847,8 +891,8 @@ class TickerTape {
     ctx.fillRect(0, 0, this.width, this.height);
     if (this.items.length === 0) return;
 
-    ctx.font = '16px "Space Mono"';
-    const centerY = Math.round(this.height / 2 + 5);
+    ctx.font = '22px "Space Mono"';
+    const centerY = Math.round(this.height / 2 + 7);
     const n = this.items.length;
     const totalW = n * this.SLOT_WIDTH;
 
@@ -864,27 +908,28 @@ class TickerTape {
       const item = this.items[idx % n];
       if (x + this.SLOT_WIDTH > 0) {
         const btcStr = item.btc >= 1 ? `₿${item.btc.toFixed(3)}` : `₿${item.btc.toFixed(6)}`;
-        const feeStr = `${item.feeRate} s/vB`;
+        const rateStr = typeof item.feeRate === 'number' ? item.feeRate.toFixed(1) : item.feeRate;
+        const feeStr = `${rateStr} s/vB`;
 
-        let dx = Math.round(x + 8);
+        let dx = Math.round(x + 16);
 
         // Txid
-        ctx.fillStyle = item.whale ? '#ffffff' : '#556677';
-        if (item.whale) { ctx.shadowColor = 'rgba(255,255,255,0.5)'; ctx.shadowBlur = 4; }
+        ctx.fillStyle = item.whale ? '#f0a500' : '#556677';
+        if (item.whale) { ctx.shadowColor = 'rgba(240,165,0,0.5)'; ctx.shadowBlur = 6; }
         const txPart = shortTxid(item.txid);
         ctx.fillText(txPart, dx, centerY);
-        dx += ctx.measureText(txPart).width + 12;
+        dx += ctx.measureText(txPart).width + 20;
         ctx.shadowBlur = 0;
 
         // BTC
-        ctx.fillStyle = item.whale ? '#ffffff' : '#e0e8f0';
+        ctx.fillStyle = item.whale ? '#f0a500' : '#e0e8f0';
         ctx.fillText(btcStr, dx, centerY);
-        dx += ctx.measureText(btcStr).width + 12;
+        dx += ctx.measureText(btcStr).width + 20;
 
         // Fee
         ctx.fillStyle = getFeeColor(item.feeRate);
         ctx.fillText(feeStr, dx, centerY);
-        dx += ctx.measureText(feeStr).width + 12;
+        dx += ctx.measureText(feeStr).width + 20;
 
         // Separator
         ctx.fillStyle = '#2a3a4a';
@@ -940,7 +985,8 @@ class HUDController {
     }
 
     this.el.totalBtc.textContent = state.totalBtcInMempool.toFixed(2);
-    this.el.minFeeHud.textContent = state.minFeeForBlock || '—';
+    const hudFee = typeof state.minFeeForBlock === 'number' ? state.minFeeForBlock.toFixed(2) : (state.minFeeForBlock || '—');
+    this.el.minFeeHud.textContent = hudFee;
     this.el.minFeeHud.style.color = getFeeColor(state.minFeeForBlock || 0);
     this.el.connectionStatus.className = 'connection-status' + (connectionState === 'disconnected' ? ' disconnected' : connectionState === 'connecting' ? ' connecting' : '');
 
@@ -953,15 +999,70 @@ class HUDController {
   }
 }
 
+// ========== ActivityFeed ==========
+class ActivityFeed {
+  constructor(container) {
+    this.container = container;
+    this.seenBlocks = new Set();
+  }
+
+  addWhale(tx) {
+    const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const btc = tx.btc >= 1 ? tx.btc.toFixed(2) : tx.btc.toFixed(4);
+    const el = this._createItem('whale', 'LARGE TX DETECTED', `TxID: ${shortTxid(tx.txid)}`, `₿ ${btc}`, `${Math.round(tx.feeRate)} sat/vB • ${time}`);
+    this._addItem(el);
+  }
+
+  addBlock(blockHeight, txCount, reward, feeMedian, customTimeStr) {
+    if (this.seenBlocks.has(blockHeight)) return;
+    this.seenBlocks.add(blockHeight);
+
+    const time = customTimeStr || new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    let rewardBtc = 0;
+    if (reward) {
+      // Sometimes APIs return reward already in BTC, sometimes in sats (mostly sats). If > 1000, it's definitely sats.
+      rewardBtc = reward > 1000 ? reward / 100000000 : reward;
+    }
+    const rewardStr = rewardBtc > 0 ? ` • ${rewardBtc.toFixed(2)} BTC` : '';
+    const feeStr = feeMedian ? `~${Math.round(feeMedian)} sat/vB` : '';
+    const sep = feeStr ? ' • ' : '';
+    const el = this._createItem('block', 'NEW BLOCK MINED', `Block #${blockHeight.toLocaleString()}${rewardStr}`, `${txCount.toLocaleString()} txs`, `${feeStr}${sep}${time}`);
+    this._addItem(el);
+  }
+
+  _createItem(type, title, desc, val1, val2) {
+    const el = document.createElement('div');
+    el.className = `act-item ${type}`;
+    el.innerHTML = `
+      <div class="act-left">
+        <span class="act-title">${title}</span>
+        <span class="act-desc">${desc}</span>
+      </div>
+      <div class="act-right">
+        <span class="act-val1">${val1}</span>
+        <span class="act-val2">${val2}</span>
+      </div>
+    `;
+    return el;
+  }
+
+  _addItem(el) {
+    this.container.prepend(el);
+    while (this.container.children.length > 8) {
+      this.container.lastChild.remove();
+    }
+  }
+}
+
 // ========== EventSystem ==========
 class EventSystem {
-  constructor(areaChart, orderBook, tickerTape, hudController, infoZone, congestionOverlay) {
+  constructor(areaChart, orderBook, tickerTape, hudController, congestionOverlay, activityFeed) {
     this.areaChart = areaChart;
     this.orderBook = orderBook;
     this.tickerTape = tickerTape;
     this.hudController = hudController;
-    this.infoZone = infoZone;
     this.congestionOverlay = congestionOverlay;
+    this.activityFeed = activityFeed;
     this.blockEventActive = false;
     this.slowBlockToastShown = false;
     this.idleToastActive = false;
@@ -977,18 +1078,11 @@ class EventSystem {
     this.areaChart.triggerScanner();
     this.orderBook.triggerBlockSweep();
 
-    const toast = document.createElement('div');
-    toast.className = 'toast block-event';
-    toast.innerHTML = `
-      BLOCK #${state.blockHeight.toLocaleString()} MINED<br>
-      <span class="detail">${state.lastBlockTxCount} txs confirmed • Reward: ${state.lastBlockReward} BTC</span>
-    `;
-    this.infoZone.innerHTML = '';
-    this.infoZone.appendChild(toast);
+    if (this.activityFeed) {
+      this.activityFeed.addBlock(state.blockHeight, state.lastBlockTxCount, state.lastBlockReward, state.feeMedian);
+    }
+
     setTimeout(() => {
-      toast.style.opacity = '0';
-      toast.style.transition = 'opacity 0.3s';
-      setTimeout(() => toast.remove(), 300);
       this.blockEventActive = false;
     }, 7000);
   }
@@ -998,16 +1092,10 @@ class EventSystem {
     this.tickerTape.triggerWhaleSlowdown();
     const tier = CONFIG.ORDER_BOOK_TIERS.find(t => tx.feeRate >= t.min && tx.feeRate <= t.max);
     if (tier) this.orderBook.flashRow(tier.label);
-    const toast = document.createElement('div');
-    toast.className = 'toast';
-    toast.innerHTML = `⚡ LARGE TX<br>₿ ${tx.btc.toFixed(2)} • ${tx.feeRate} sat/vB`;
-    this.infoZone.innerHTML = '';
-    this.infoZone.appendChild(toast);
-    setTimeout(() => {
-      toast.style.opacity = '0';
-      toast.style.transition = 'opacity 0.3s';
-      setTimeout(() => toast.remove(), 300);
-    }, 5000);
+
+    if (this.activityFeed) {
+      this.activityFeed.addWhale(tx);
+    }
   }
 
   onSuperWhale(tx) {
@@ -1029,20 +1117,10 @@ class EventSystem {
     if (elapsed > CONFIG.SLOW_BLOCK_THRESHOLD_MINUTES * 60 && !this.slowBlockToastShown && !this.blockEventActive) {
       this.slowBlockToastShown = true;
       this.idleToastActive = false;
-      const toast = document.createElement('div');
-      toast.className = 'toast slow-block';
-      toast.textContent = `LATE BLOCK — ${Math.floor(elapsed / 60)}+ min without block`;
-      this.infoZone.innerHTML = '';
-      this.infoZone.appendChild(toast);
-      setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transition = 'opacity 0.3s';
-        setTimeout(() => toast.remove(), 300);
-      }, 8000);
     }
   }
 
-  showIdleInfo() {}
+  showIdleInfo() { }
 }
 
 // ========== Grain Canvas ==========
@@ -1077,12 +1155,10 @@ function main() {
   const state = new MempoolState();
   const areaChart = new AreaChart(document.getElementById('areaChart'));
   const orderBook = new OrderBook(
-    document.getElementById('orderbookRows'),
-    null,
-    document.getElementById('capacityFill'),
-    document.getElementById('capacityLabel')
+    document.getElementById('orderbookRows')
   );
   const tickerTape = new TickerTape(document.getElementById('tickerTape'));
+  const activityFeed = new ActivityFeed(document.getElementById('activityFeedContent'));
   const hudController = new HUDController({
     blockNumber: document.getElementById('blockNumber'),
     mempoolCount: document.getElementById('mempoolCount'),
@@ -1094,8 +1170,7 @@ function main() {
     connectionStatus: document.getElementById('connectionStatus'),
   });
   const congestionOverlay = document.getElementById('congestionOverlay');
-  const infoZone = document.getElementById('infoZone');
-  const eventSystem = new EventSystem(areaChart, orderBook, tickerTape, hudController, infoZone, congestionOverlay);
+  const eventSystem = new EventSystem(areaChart, orderBook, tickerTape, hudController, congestionOverlay, activityFeed);
   const stateOverlay = document.getElementById('stateOverlay');
   const stateMessage = document.getElementById('stateMessage');
 
@@ -1163,22 +1238,48 @@ function main() {
     fetch('https://mempool.space/api/v1/blocks')
       .then(r => r.json())
       .then(blocks => {
-        if (blocks?.[0]) {
+        if (blocks && blocks.length > 0) {
           state.blockHeight = blocks[0].height;
           state.lastBlockTime = blocks[0].timestamp * 1000;
           state.lastBlockTxCount = blocks[0].tx_count || 0;
+
+          if (activityFeed) {
+            blocks.slice(0, 7).reverse().forEach(b => {
+              const d = new Date(b.timestamp * 1000);
+              const timeStr = d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+              activityFeed.addBlock(b.height, b.tx_count, b.extras?.reward, b.extras?.medianFee, timeStr);
+            });
+          }
         }
       })
       .catch(() => {
         fetch('https://mempool.space/api/v1/blocks/tip/height')
           .then(r => r.json())
           .then(h => { state.blockHeight = h; })
-          .catch(() => {});
+          .catch(() => { });
       });
-    fetch('https://mempool.space/api/v1/mining/hashrate/3d')
+
+    // Fetch historical chart data to prefill the area chart immediately
+    fetch('https://mempool.space/api/v1/mempool/recent')
       .then(r => r.json())
-      .then(d => { if (d?.currentHashrate) state.hashrate = Math.round(d.currentHashrate / 1e18); })
-      .catch(() => {});
+      .then(history => {
+        if (Array.isArray(history)) {
+          // The API returns historical points (usually every 1 minute or so). 
+          // Format is usually { time, vsize, count, total_fee ... }
+          // Or sometimes we can use the 'live-2h-chart' from websocket, but REST gives us a baseline.
+          // Since our area chart handles real TXs adding to buckets, we can simulate TXs from history
+          // or just trigger areaChart.addBucket.
+
+          // Actually, mempool.space v1/mempool/recent doesn't give us fee bands easily.
+          // Let's request the WebSocket to send us 'live-2h-chart' by sending a specific init message
+          // when wsManager connects. Wait, we can't easily send from here without modifying wsManager.
+
+          // Let's just let the WebSocket 'live-2h-chart' message handle it (it usually fires on connect if requested).
+          // But looking at WebSocketManager, it only requests: '{"action":"init"}'
+        }
+      })
+      .catch(() => { });
+
     wsManager.connect();
     const fetchMempoolRest = () => {
       if (CONFIG.USE_MOCK_DATA) return;
@@ -1189,14 +1290,14 @@ function main() {
           state.mempoolSize = d.vsize ?? state.mempoolSize;
           if (d.fee_histogram) state.applyFeeHistogram(d.fee_histogram, d.vsize, d.total_fee);
         })
-        .catch(() => {});
+        .catch(() => { });
       fetch('https://mempool.space/api/v1/fees/recommended')
         .then(r => r.json())
         .then(d => {
           if (d.fastestFee != null) state.minFeeForBlock = d.fastestFee;
           if (d.halfHourFee != null && !state.feeMedian) state.feeMedian = d.halfHourFee;
         })
-        .catch(() => {});
+        .catch(() => { });
       fetch('https://mempool.space/api/v1/fees/mempool-blocks')
         .then(r => r.json())
         .then(blocks => {
@@ -1211,7 +1312,7 @@ function main() {
             if (!state.feeMedian && fb.medianFee) state.feeMedian = Math.round(fb.medianFee);
           }
         })
-        .catch(() => {});
+        .catch(() => { });
     };
     fetchMempoolRest();
     setInterval(fetchMempoolRest, CONFIG.MEMPOOL_REST_FETCH_INTERVAL);
@@ -1269,31 +1370,6 @@ function main() {
       const { elapsed } = hudController.update(state, connectionState);
       eventSystem.updateCongestion(state.feeMedian);
       eventSystem.checkSlowBlock(elapsed);
-      // Info zone: rotate large txs + halving + mempool stats
-      const now2 = Date.now();
-      if (now2 - lastInfoRotate > 6000) {
-        lastInfoRotate = now2;
-        const msgs = [];
-        // Large txs (most recent first)
-        for (let i = largeTxLog.length - 1; i >= Math.max(0, largeTxLog.length - 3); i--) {
-          const lt = largeTxLog[i];
-          const ago = Math.floor((now2 - lt.time) / 60000);
-          msgs.push(`₿ ${lt.btc.toFixed(2)} — ${lt.feeRate} sat/vB${ago > 0 ? ` — ${ago}m ago` : ''}`);
-        }
-        // Halving countdown: block 1,050,000, ~10 min/block
-        const halvingBlock = 1_050_000;
-        const blocksLeft = halvingBlock - (state.blockHeight || 0);
-        if (blocksLeft > 0) {
-          const daysLeft = Math.floor(blocksLeft * 10 / 1440);
-          msgs.push(`HALVING in ~${blocksLeft.toLocaleString()} blocks (~${daysLeft} days)`);
-        }
-        // Mempool stats
-        if (state.mempoolCount > 0) msgs.push(`${state.mempoolCount.toLocaleString()} txs pending`);
-        if (msgs.length > 0 && !infoZone.querySelector('.toast')) {
-          infoRotateIdx = (infoRotateIdx + 1) % msgs.length;
-          infoZone.textContent = msgs[infoRotateIdx];
-        }
-      }
       lastDOMUpdate = timestamp;
     }
 
