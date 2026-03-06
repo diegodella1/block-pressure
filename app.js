@@ -434,11 +434,7 @@ class AreaChart {
   }
 
   addTx(tx) {
-    const btc = tx.btc ?? satsToBtc(tx.value ?? 0);
-    if (btc >= 50) {
-      // Anchored to the far right (NOW) when created
-      this.whaleSpikes.push({ time: Date.now(), btc, x: this.width });
-    }
+    // Rely on global eventSystem.onWhale() for spikes to avoid duplication
   }
 
   addWhaleSpike(btc) {
@@ -669,36 +665,37 @@ class AreaChart {
         }
       }
 
-      // Float the whale slightly above the curve tip
-      let drawY = curveY - 40;
+      // Float the whale so its tip perfectly touches the curve
+      let drawY = curveY - 16;
 
       // Auto-stacking if multiple whales are clumping together
       for (const existing of drawnSpikes) {
         if (Math.abs(existing.x - spike.x) < 50 && Math.abs(existing.y - drawY) < 30) {
-          drawY += 34; // Push it down
+          drawY -= 34; // Push it UP instead of down so it doesn't clip into the curve
         }
       }
       drawnSpikes.push({ x: spike.x, y: drawY });
 
-      // Offset by .5 is a canvas trick to sharpen images/rects on some DPR ratios
-      const renderX = Math.round(spike.x) + 0.5;
-      const renderY = Math.round(drawY) + 0.5;
+      // Strict integer rendering for maximum sharpness
+      const renderX = Math.round(spike.x);
+      const renderY = Math.round(drawY);
 
-      // Draw SVG Whale
-      ctx.shadowColor = 'rgba(240,165,0,0.8)';
-      ctx.shadowBlur = 10;
+      // Draw SVG Whale (No shadow to prevent blurriness)
       if (this.鯨Img.complete) {
-        // Draw the whale centered around its tip, increased to 32x32 for better visibility
+        // Draw the whale centered horizontally, bottom touching renderY
         ctx.drawImage(this.鯨Img, renderX - 16, renderY - 16, 32, 32);
       } else {
         ctx.fillStyle = '#f0a500';
         ctx.fillText('⚡', renderX - 8, renderY);
       }
-      ctx.shadowBlur = 0;
 
       // Draw BTC amount text next to the whale
       ctx.fillStyle = '#ffffff';
+      // Small shadow only on the text so it's readable if it overlaps a line, but keep it tight
+      ctx.shadowColor = '#000000';
+      ctx.shadowBlur = 4;
       ctx.fillText(`₿ ${Math.round(spike.btc)}`, renderX + 22, renderY);
+      ctx.shadowBlur = 0;
     }
     ctx.textBaseline = 'alphabetic'; // Reset
 
