@@ -477,7 +477,7 @@ class AreaChart {
   render() {
     if (!this.width || !this.height) return;
     const ctx = this.ctx;
-    ctx.fillStyle = '#070f1c';
+    ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, this.width, this.height);
     const padding = { left: 60, right: 20, top: 30, bottom: 40 };
     const chartW = this.width - padding.left - padding.right;
@@ -993,7 +993,7 @@ class TickerTape {
   render() {
     if (!this.width || !this.height) return;
     const ctx = this.ctx;
-    ctx.fillStyle = '#050d18';
+    ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, this.width, this.height);
 
     ctx.font = 'bold 28px "Space Mono"';
