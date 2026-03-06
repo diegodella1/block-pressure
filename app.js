@@ -596,6 +596,9 @@ class AreaChart {
       const feeLowPoints = [];
       const feeHighPoints = [];
 
+      // We will store the absolute top boundary of the graph to anchor whale icons
+      this.topCurveMap = [];
+
       for (let i = 0; i < data.length; i++) {
         const d = data[i];
         // Calculate X position by subtracting bucket widths from the 'latestBucketX'
@@ -613,7 +616,12 @@ class AreaChart {
         confirmedPoints.push({ x, y: y1 });
         feeLowPoints.push({ x, y: y2 });
         feeHighPoints.push({ x, y: y3 });
+
+        this.topCurveMap.push({ x, y: y3 });
       }
+
+      this.topCurveMap.sort((a, b) => a.x - b.x); // Ensure ascending for binary search/lerp
+
       drawAreaFromBase(bottomY, confirmedPoints, '#0d2137');
       const gradLow = ctx.createLinearGradient(0, bottomY, 0, padding.top);
       gradLow.addColorStop(0, 'rgba(26,74,122,0.9)');
@@ -637,29 +645,60 @@ class AreaChart {
     ctx.shadowBlur = 0;
 
     // Draw Whale Markers
-    ctx.font = '14px "Space Mono"';
+    ctx.font = 'bold 18px "Space Mono"';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
+
+    // Collision detection helper logic
+    const drawnSpikes = [];
+
     for (const spike of this.whaleSpikes) {
       if (spike.x > padding.left + chartW || spike.x < padding.left) continue;
 
-      const drawY = padding.top + 20;
+      let curveY = padding.top + chartH;
+      if (this.topCurveMap && this.topCurveMap.length > 0) {
+        // Find nearest X in the curve map to determine the height.
+        // A simple linear scan is fast enough given the small array size (< 100 buckets)
+        let nearestDist = Infinity;
+        for (const pt of this.topCurveMap) {
+          const dist = Math.abs(pt.x - spike.x);
+          if (dist < nearestDist) {
+            nearestDist = dist;
+            curveY = pt.y;
+          }
+        }
+      }
+
+      // Float the whale slightly above the curve tip
+      let drawY = curveY - 40;
+
+      // Auto-stacking if multiple whales are clumping together
+      for (const existing of drawnSpikes) {
+        if (Math.abs(existing.x - spike.x) < 50 && Math.abs(existing.y - drawY) < 30) {
+          drawY += 34; // Push it down
+        }
+      }
+      drawnSpikes.push({ x: spike.x, y: drawY });
+
+      // Offset by .5 is a canvas trick to sharpen images/rects on some DPR ratios
+      const renderX = Math.round(spike.x) + 0.5;
+      const renderY = Math.round(drawY) + 0.5;
 
       // Draw SVG Whale
-      ctx.shadowColor = 'rgba(240,165,0,0.6)';
-      ctx.shadowBlur = 8;
+      ctx.shadowColor = 'rgba(240,165,0,0.8)';
+      ctx.shadowBlur = 10;
       if (this.鯨Img.complete) {
-        // Draw the whale centered around its tip
-        ctx.drawImage(this.鯨Img, spike.x - 12, drawY - 12, 24, 24);
+        // Draw the whale centered around its tip, increased to 32x32 for better visibility
+        ctx.drawImage(this.鯨Img, renderX - 16, renderY - 16, 32, 32);
       } else {
         ctx.fillStyle = '#f0a500';
-        ctx.fillText('⚡', spike.x - 6, drawY);
+        ctx.fillText('⚡', renderX - 8, renderY);
       }
       ctx.shadowBlur = 0;
 
       // Draw BTC amount text next to the whale
-      ctx.fillStyle = '#e0e8f0';
-      ctx.fillText(`${Math.round(spike.btc)} BTC`, spike.x + 16, drawY);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(`₿ ${Math.round(spike.btc)}`, renderX + 22, renderY);
     }
     ctx.textBaseline = 'alphabetic'; // Reset
 
@@ -757,7 +796,7 @@ class OrderBook {
           }
 
           el.textContent = text;
-          el.style.cssText = 'position:relative;border-top:1px solid #f0a500;padding:6px 16px;font-size:14px;color:#f0a500;box-shadow:0 0 12px rgba(240,165,0,0.5);letter-spacing:1.5px;font-weight:700;text-align:center;text-transform:uppercase;';
+          el.style.cssText = 'position:relative;border-top:1px solid #f0a500;padding:8px 16px;font-size:17px;color:#f0a500;box-shadow:0 0 12px rgba(240,165,0,0.5);letter-spacing:1.5px;font-weight:700;text-align:center;text-transform:uppercase;height:35px;display:flex;align-items:center;justify-content:center;';
         } else {
           el = this._createRow(row);
         }
@@ -864,14 +903,14 @@ class OrderBook {
 class TickerTape {
   constructor(canvas) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
-    this.items = [];
-    this.pixelOffset = 0;
+    this.ctx = canvas.getContext('2d', { alpha: false });
+
+    this.activeTx = [];   // Items currently flowing on screen with {x, txid, btc, ...}
+    this.dataQueue = [];  // Raw transactions from websocket
+
     this.speed = CONFIG.TICKER_BASE_SPEED;
     this.whaleSlowdownUntil = 0;
-    this.whaleSlowdownUntil = 0;
-    // Fixed-width slot system: each tx gets exactly SLOT_WIDTH pixels
-    this.SLOT_WIDTH = 650;
+    this.SLOT_WIDTH = 750;
   }
 
   resize() {
@@ -889,8 +928,13 @@ class TickerTape {
     const btc = tx.btc ?? satsToBtc(tx.value ?? 0);
     const feeRate = tx.feeRate ?? 0;
     const txid = tx.txid || '';
-    this.items.push({ txid, btc, feeRate, whale: btc >= 50 });
-    if (this.items.length > CONFIG.TICKER_BUFFER_SIZE) this.items.shift();
+
+    this.dataQueue.push({ txid, btc, feeRate, whale: btc >= 50 });
+
+    // Cap buffer so we only show the freshest stuff if they come in super fast
+    if (this.dataQueue.length > 50) {
+      this.dataQueue.shift();
+    }
   }
 
   triggerWhaleSlowdown() {
@@ -898,15 +942,52 @@ class TickerTape {
   }
 
   update(delta, feeMedian) {
-    // Cap delta to avoid jumps on tab switch / GC pause
     const dt = Math.min(delta, 50);
     let targetSpeed = CONFIG.TICKER_BASE_SPEED;
     if (feeMedian > 200) targetSpeed = CONFIG.TICKER_MAX_SPEED;
     else if (feeMedian > 100) targetSpeed = CONFIG.TICKER_BASE_SPEED * 1.4;
     else if (feeMedian < 10) targetSpeed = CONFIG.TICKER_MIN_SPEED;
     if (Date.now() < this.whaleSlowdownUntil) targetSpeed *= 0.5;
+
     this.speed += (targetSpeed - this.speed) * 0.03;
-    this.pixelOffset += (dt / 1000) * this.speed;
+    const dx = (dt / 1000) * this.speed;
+
+    // Move everything left
+    for (const item of this.activeTx) {
+      item.x -= dx;
+    }
+
+    // Remove items that scrolled completely off
+    while (this.activeTx.length > 0 && this.activeTx[0].x < -this.SLOT_WIDTH) {
+      this.activeTx.shift();
+    }
+
+    // Feed new items onto the right screen edge
+    // Keep feeding until the right-most item is past the right bounding box edge
+    while (this.activeTx.length === 0 || this.activeTx[this.activeTx.length - 1].x < this.width) {
+      let startX = this.width;
+      if (this.activeTx.length > 0) {
+        startX = Math.max(this.width, this.activeTx[this.activeTx.length - 1].x + this.SLOT_WIDTH);
+      }
+
+      // Get the next real tx from websocket buffer
+      let nextData = null;
+      if (this.dataQueue.length > 0) {
+        nextData = this.dataQueue.shift();
+      } else if (this.activeTx.length > 0) {
+        // Loop a random historically seen item if no new ones are streaming
+        const randomItem = this.activeTx[Math.floor(Math.random() * this.activeTx.length)];
+        nextData = { ...randomItem };
+      } else {
+        // Fallback fake item if brand new session
+        nextData = { txid: 'WAITING FOR TXS...', btc: 0, feeRate: 0, whale: false };
+      }
+
+      this.activeTx.push({
+        ...nextData,
+        x: startX
+      });
+    }
   }
 
   render() {
@@ -914,54 +995,48 @@ class TickerTape {
     const ctx = this.ctx;
     ctx.fillStyle = '#050d18';
     ctx.fillRect(0, 0, this.width, this.height);
-    if (this.items.length === 0) return;
 
-    ctx.font = '22px "Space Mono"';
-    const centerY = Math.round(this.height / 2 + 7);
-    const n = this.items.length;
-    const totalW = n * this.SLOT_WIDTH;
+    ctx.font = 'bold 28px "Space Mono"';
+    const centerY = Math.round(this.height / 2 + 10);
 
-    // How far into the cycle we are
-    const cycle = ((this.pixelOffset % totalW) + totalW) % totalW;
-    // Starting item index and pixel position
-    const startIdx = Math.floor(cycle / this.SLOT_WIDTH);
-    const startFrac = cycle - startIdx * this.SLOT_WIDTH;
+    for (const item of this.activeTx) {
+      // Optimization, don't draw if fully off screen bounds
+      if (item.x > this.width || item.x < -this.SLOT_WIDTH) continue;
 
-    let x = -startFrac;
-    let idx = startIdx;
-    while (x < this.width) {
-      const item = this.items[idx % n];
-      if (x + this.SLOT_WIDTH > 0) {
-        const btcStr = item.btc >= 1 ? `₿${item.btc.toFixed(3)}` : `₿${item.btc.toFixed(6)}`;
-        const rateStr = typeof item.feeRate === 'number' ? item.feeRate.toFixed(1) : item.feeRate;
-        const feeStr = `${rateStr} s/vB`;
+      const btcStr = item.btc >= 1 ? `₿${item.btc.toFixed(3)}` : `₿${item.btc.toFixed(6)}`;
+      const rateStr = typeof item.feeRate === 'number' ? item.feeRate.toFixed(1) : item.feeRate;
+      let feeStr = `${rateStr} s/vB`;
 
-        let dx = Math.round(x + 16);
+      // Override for the fallback fake item
+      if (item.txid === 'WAITING FOR TXS...') {
+        feeStr = '';
+      }
 
-        // Txid
-        ctx.fillStyle = item.whale ? '#f0a500' : '#556677';
-        if (item.whale) { ctx.shadowColor = 'rgba(240,165,0,0.5)'; ctx.shadowBlur = 6; }
-        const txPart = shortTxid(item.txid);
-        ctx.fillText(txPart, dx, centerY);
-        dx += ctx.measureText(txPart).width + 20;
-        ctx.shadowBlur = 0;
+      let drawX = Math.round(item.x + 20);
 
+      // Txid
+      ctx.fillStyle = item.whale ? '#ffbe00' : '#778899';
+      if (item.whale) { ctx.shadowColor = 'rgba(240,165,0,0.5)'; ctx.shadowBlur = 6; }
+      const txPart = shortTxid(item.txid);
+      ctx.fillText(txPart, drawX, centerY);
+      drawX += ctx.measureText(txPart).width + 20;
+      ctx.shadowBlur = 0;
+
+      if (item.txid !== 'WAITING FOR TXS...') {
         // BTC
-        ctx.fillStyle = item.whale ? '#f0a500' : '#e0e8f0';
-        ctx.fillText(btcStr, dx, centerY);
-        dx += ctx.measureText(btcStr).width + 20;
+        ctx.fillStyle = item.whale ? '#ffbe00' : '#ffffff';
+        ctx.fillText(btcStr, drawX, centerY);
+        drawX += ctx.measureText(btcStr).width + 24;
 
         // Fee
         ctx.fillStyle = getFeeColor(item.feeRate);
-        ctx.fillText(feeStr, dx, centerY);
-        dx += ctx.measureText(feeStr).width + 20;
+        ctx.fillText(feeStr, drawX, centerY);
+        drawX += ctx.measureText(feeStr).width + 24;
 
         // Separator
         ctx.fillStyle = '#2a3a4a';
-        ctx.fillText('◆', dx, centerY);
+        ctx.fillText('◆', drawX, centerY);
       }
-      x += this.SLOT_WIDTH;
-      idx++;
     }
   }
 }
@@ -1207,7 +1282,13 @@ function main() {
   // Large tx log for info zone
   const largeTxLog = [];
 
+  // Track seen txids to prevent history/live websocket overlap
+  const seenTxids = new Set();
+
   const processTx = (t) => {
+    if (!t.txid || seenTxids.has(t.txid)) return;
+    seenTxids.add(t.txid);
+
     areaChart.addTx(t);
     tickerTape.addTx(t);
     if ((t.value || 0) >= CONFIG.WHALE_THRESHOLD_SATS) {
