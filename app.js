@@ -212,7 +212,12 @@ class MempoolState {
       this.mempoolCount = data.stats.count || data.stats.mempool_count || this.mempoolCount;
       this.mempoolSize = data.stats.vsize || data.stats.mempool_size || data.stats.size || this.mempoolSize;
       this.feeMedian = data.stats.medianFee || data.stats.fee_median || data.stats.avgFee_median || this.feeMedian;
-      this.hashrate = data.stats.hashrate || data.stats.hashrate_24h || 0;
+      this.hashrate = data.stats.hashrate || data.stats.hashrate_24h || this.hashrate;
+    }
+
+    // --- difficulty / hashrate (da) ---
+    if (data.da && data.da.estimatedHashrate) {
+      this.hashrate = Math.round(data.da.estimatedHashrate / 1e18);
     }
     if (data.avgFee_median !== undefined) this.feeMedian = data.avgFee_median;
     if (data.medianFee !== undefined) this.feeMedian = data.medianFee;
@@ -421,8 +426,11 @@ class AreaChart {
   addBucket(totalBtc, feeHighBtc, feeLowBtc, confirmedBtc) {
     const t = Date.now();
     this.buckets.push(t, totalBtc || 0, feeHighBtc || 0, feeLowBtc || 0, confirmedBtc || 0);
-    const maxBuckets = (CONFIG.CHART_WINDOW_MINUTES * 60) / CONFIG.CHART_BUCKET_SECONDS;
-    while (this.buckets.length / 5 > maxBuckets) this.buckets.splice(0, 5);
+    // Keep a bit more than the required window to allow smooth shifting off-screen
+    const maxBuckets = Math.ceil((CONFIG.CHART_WINDOW_MINUTES * 60) / CONFIG.CHART_BUCKET_SECONDS) + 2;
+    while (this.buckets.length / 5 > maxBuckets) {
+      this.buckets.splice(0, 5);
+    }
   }
 
   addTx(tx) {
@@ -479,24 +487,35 @@ class AreaChart {
     const bucketMs = CONFIG.CHART_BUCKET_SECONDS * 1000;
     const bucketCount = Math.floor(windowMs / bucketMs);
     const data = [];
-    for (let i = 0; i < bucketCount; i++) {
-      const idx = (this.buckets.length / 5) - 1 - i;
-      if (idx >= 0) {
-        const ts = this.buckets[idx * 5];
-        const total = this.buckets[idx * 5 + 1] || 0;
-        const feeHigh = this.buckets[idx * 5 + 2] || 0;
-        const feeLow = this.buckets[idx * 5 + 3] || 0;
-        const confirmed = this.buckets[idx * 5 + 4] || 0;
-        data.push({ ts, total, feeHigh, feeLow, confirmed });
-      }
+    const validBuckets = Math.floor(this.buckets.length / 5);
+    // Draw all available buckets, even if it exceeds the exact screen count, to allow off-screen rendering
+    for (let i = 0; i < validBuckets; i++) {
+      const ts = this.buckets[i * 5];
+      const total = this.buckets[i * 5 + 1] || 0;
+      const feeHigh = this.buckets[i * 5 + 2] || 0;
+      const feeLow = this.buckets[i * 5 + 3] || 0;
+      const confirmed = this.buckets[i * 5 + 4] || 0;
+      data.push({ ts, total, feeHigh, feeLow, confirmed });
     }
-    data.reverse();
     const sum = (d) => (d.confirmed || 0) + (d.total || 0);
     const maxY = Math.max(0.15, ...(data.length ? data.map(sum) : [0.15]));
     const scaleY = chartH / maxY;
+
+    // Width of a single time bucket in pixels
     const bucketWidth = chartW / bucketCount;
-    const offsetX = (this.scrollOffset % bucketWidth);
-    const baseX = padding.left + chartW - offsetX;
+
+    // We base the entire offset on Time Difference from NOW to the most recent bucket,
+    // plus any previous bucket spacing, so it never 'snaps' or 'loops' when an array shifts.
+    let timeSinceLastBucketMs = 0;
+    if (data.length > 0) {
+      timeSinceLastBucketMs = Math.max(0, now - data[data.length - 1].ts);
+    }
+
+    // Fractional pixel shift representing the time passed since the last bucket was added
+    const fractionalShiftPixels = (timeSinceLastBucketMs / bucketMs) * bucketWidth;
+
+    // The X coordinate of the very last known data point
+    const latestBucketX = padding.left + chartW - fractionalShiftPixels;
 
     // Y-axis grid + labels
     for (let i = 0; i < 5; i++) {
@@ -576,15 +595,21 @@ class AreaChart {
       const confirmedPoints = [];
       const feeLowPoints = [];
       const feeHighPoints = [];
+
       for (let i = 0; i < data.length; i++) {
         const d = data[i];
-        const x = baseX - (data.length - 1 - i) * bucketWidth;
+        // Calculate X position by subtracting bucket widths from the 'latestBucketX'
+        // Moving backwards in the array from the newest to the oldest
+        const distanceFromNewest = (data.length - 1) - i;
+        const x = latestBucketX - (distanceFromNewest * bucketWidth);
+
         const confirmedH = d.confirmed * scaleY;
         const feeLowH = d.feeLow * scaleY;
         const feeHighH = d.feeHigh * scaleY;
         const y1 = bottomY - confirmedH;
         const y2 = y1 - feeLowH;
         const y3 = y2 - feeHighH;
+
         confirmedPoints.push({ x, y: y1 });
         feeLowPoints.push({ x, y: y2 });
         feeHighPoints.push({ x, y: y3 });
@@ -1258,6 +1283,12 @@ function main() {
           .then(h => { state.blockHeight = h; })
           .catch(() => { });
       });
+
+    // Fetch initial hashrate
+    fetch('https://mempool.space/api/v1/mining/hashrate/3d')
+      .then(r => r.json())
+      .then(d => { if (d?.currentHashrate) state.hashrate = Math.round(d.currentHashrate / 1e18); })
+      .catch(() => { });
 
     // Fetch historical chart data to prefill the area chart immediately
     fetch('https://mempool.space/api/v1/mempool/recent')
